@@ -1,7 +1,11 @@
-import { Ionicons } from '@expo/vector-icons';
-import * as ImagePicker from 'expo-image-picker';
-import React from 'react';
+import { supabase } from "@/service/supabase";
+import { Ionicons } from "@expo/vector-icons";
+import { decode } from "base64-arraybuffer";
+import * as ImagePicker from "expo-image-picker";
+import { useRouter } from "expo-router";
+import React, { useState } from "react";
 import {
+    Alert,
     Image,
     KeyboardAvoidingView,
     Platform,
@@ -10,201 +14,207 @@ import {
     Text,
     TextInput,
     TouchableOpacity,
-    View
-} from 'react-native';
+    View,
+} from "react-native";
 
 export default function Add() {
+  const router = useRouter();
 
-    const [location, setLocation] = React.useState('')
-    const [distance, setDistance] = React.useState('')
-    const [timeOfDay, setTimeOfDay] = React.useState('')
-    const [image, setImage] = React.useState<string | null>(null)
-    const [base64Image, setBase64Image] = React.useState<string | null>(null)
+  // สร้าง state สำหรับเก็บข้อมูลที่กรอก
+  const [location, setLocation] = useState("");
+  const [distance, setDistance] = useState("");
+  const [timeOfDay, setTimeOfDay] = useState("เช้า"); // ค่าเริ่มต้นเป็น "เช้า"
+  const [image, setImage] = useState<string | null>(null);
+  const [base64Image, setBase64Image] = useState<string | null>(null);
 
+  // ฟังก์ชันสำหรับเปิดกล้องถ่ายภาพหรือเลือกภาพจากแกลเลอรี่
+  const handleTakePhoto = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== "granted") {
+      alert("ขออนุญาตเข้าถึงกล้องเพื่อถ่ายภาพหน่อยนะคะคนดี");
+      return;
+    }
 
-    //functon open camera or pick image from library
-    const handleTakePhoto = async () => {
-        const { status } = await ImagePicker.requestCameraPermissionsAsync();
-        if (status !== 'granted') {
-            alert('ขออนุญาตเข้าถึงกล้องเพื่อถ่ายภาพ');
-            return;
-        }
+    // เปิดกล้องถ่ายภาพ
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.5,
+      base64: true, // เพิ่มตัวเลือกนี้เพื่อรับข้อมูลภาพในรูปแบบ Base64
+    });
 
-        const result = await ImagePicker.launchCameraAsync({
-            allowsEditing: true,
-            aspect: [4, 3],
-            quality: 0.7,
-            base64: true,
-        });
+    // หลังจากถ่ายเสร็จแล้ว เอาไปกับ state ที่เตรียมไว้
+    if (!result.canceled) {
+      setImage(result.assets[0].uri);
+      setBase64Image(result.assets[0].base64 || null); // เก็บข้อมูล Base64 ใน state แยกต่างหาก
+    }
+  };
 
-        if (!result.canceled) {
-            setImage(result.assets[0].uri);
-            setBase64Image(result.assets[0].base64 || null);
-        }
-    };
+  // ฟังก์ชันสำหรับบันทึกข้อมูลใช้ป้อน/เลือกไปไว้ที่ Supabase
+  const handleSaveToSupabase = async () => {
+    //Validation, location, distance, image
+    if (!location || !distance || !image) {
+      Alert.alert("คำเตือน", "กรุณากรอกข้อมูลให้ครบและเลือกรูปภาพด้วย");
+      return;
+    }
 
-    return (
-        <KeyboardAvoidingView
-            style={styles.container}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
-            <ScrollView contentContainerStyle={styles.scrollContainer}>
+    //อัปโหลดรูปไปยัง Bucket -> Supabase -> Storage
+    //ตัวแปรเก็บ url ของรูปที่อับโหลด
+    let image_url = null; // ตัวแปรเก็บ URL ของรูปที่อัปโหลด
+    const fileName = `img_${Date.now()}.jpg`; //ตั้งชื่อไฟล์ที่จะอัปโหลด
+    const { error: uploadError } = await supabase.storage
+      .from("nahee")
+      .upload(fileName, decode(base64Image!), {
+        contentType: "image/jpeg",
+      });
 
+    if (uploadError) throw uploadError; //ตรวจสอบการอัปโหลดรูปภาพ
 
-                <View style={{ flex: 1 }}>
-                    <Text style={styles.label}>สถานที่วิ่ง</Text>
-                    <TextInput
-                        style={styles.input}
-                        placeholder="ป้อนสถานที่วิ่ง"
-                        placeholderTextColor="#999"
-                        value={location}
-                        onChangeText={setLocation}
-                    />
+    //เอา url ของรูปที่ storage มากำหนดให้กับตัวแปรดเพื่อใช้บันทึกลงตาราง
+    image_url = await supabase.storage.from("nahee").getPublicUrl(fileName).data
+      .publicUrl;
 
-                    <Text style={styles.label}>ระยะทาง (km)</Text>
-                    <TextInput
-                        style={styles.input}
-                        placeholder="ป้อนระยะทาง"
-                        placeholderTextColor="#999"
-                        keyboardType="numeric"
-                        value={distance}
-                        onChangeText={setDistance}
-                    />
+    //บันทึกข้อมูลที่กรอกไปยัง Table -> Database -> Supabase==============
+    const { error: insertError } = await supabase.from("runs").insert([
+      {
+        location: location,
+        distance: distance,
+        time_of_day: timeOfDay,
+        run_date: new Date().toISOString().split("T")[0], // เอาแต่ ปี เดือน วัน ไม่เอาเวลา
+        image_url: image_url,
+      },
+    ]);
 
-                    <Text style={styles.label}>ช่วงเวลา</Text>
-                    <View style={styles.timeContainer}>
-                        <TouchableOpacity
-                            style={[
-                                styles.timeButton,
-                                timeOfDay === 'เช้า' && styles.timeButtonActive
-                            ]}
-                            onPress={() => setTimeOfDay('เช้า')}
-                        >
-                            <Text
-                                style={[
-                                    styles.timeText,
-                                    timeOfDay === 'เช้า' && styles.timeTextActive
-                                ]}
-                            >
-                                🌅 เช้า
-                            </Text>
-                        </TouchableOpacity>
+    if (insertError) {
+      Alert.alert(
+        "เกิดข้อผิดพลาด",
+        "ไม่สามารถบันทึกข้อมูลได้ กรุณาลองใหม่อีกครั้ง",
+      );
+      return;
+    }
 
-                        <TouchableOpacity
-                            style={[
-                                styles.timeButton,
-                                timeOfDay === 'เย็น' && styles.timeButtonActive
-                            ]}
-                            onPress={() => setTimeOfDay('เย็น')}
-                        >
-                            <Text
-                                style={[
-                                    styles.timeText,
-                                    timeOfDay === 'เย็น' && styles.timeTextActive
-                                ]}
-                            >
-                                🌇 เย็น
-                            </Text>
-                        </TouchableOpacity>
-                    </View>
+    // ถ้าบันทึกสำเร็จแสดงข้อความแจ้ง และเปิดไปที่หน้า Run
+    Alert.alert("สำเร็จ", "บันทึกข้อมูลเรียบร้อยแล้ว");
+    router.back();
+  };
 
-                    <Text style={styles.label}>รูปภาพสถานที่</Text>
-                    <TouchableOpacity style={styles.takePhotoBtn} activeOpacity={0.8} onPress={handleTakePhoto}>
-                        {
-                            image
-                                ? (<Image source={{ uri: image }} style={{ width: '100%', height: 250 }} />)
-                                : (<View style={{ alignItems: 'center' }}>
-                                    <Ionicons name="camera-outline" size={40} color="#063197" />
-                                    <Text style={{ marginTop: 10, color: '#555' }}>
-                                        กดเพื่อถ่ายภาพ
-                                    </Text>
-                                </View>)
-                        }
+  return (
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+    >
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20 }}>
+        {/* ช่องกรอกสถานที่วิ่ง */}
+        <Text style={styles.titleShow}>สถานที่วิ่ง</Text>
+        <TextInput
+          placeholder="เช่น สวนลุมพินี"
+          style={styles.inputValue}
+          value={location}
+          onChangeText={setLocation}
+        />
+        {/* ช่องกรอกระยะทาง */}
+        <Text style={styles.titleShow}>ระยะทาง (กิโลเมตร)</Text>
+        <TextInput
+          placeholder="เช่น 5.0"
+          keyboardType="numeric"
+          style={styles.inputValue}
+          value={distance}
+          onChangeText={setDistance}
+        />
+        {/* ปุ่มเลือกช่วงเวลา */}
+        <Text style={styles.titleShow}>ช่วงเวลา</Text>
+        <View style={{ flexDirection: "row", marginBottom: 20 }}>
+          <TouchableOpacity
+            onPress={() => setTimeOfDay("เช้า")}
+            style={[
+              styles.todBtn,
+              timeOfDay === "เช้า"
+                ? { backgroundColor: "#1889da" }
+                : { backgroundColor: "#b6b6b6" },
+            ]}
+          >
+            <Text style={{ fontFamily: "Kanit_400Regular", color: "white" }}>
+              เช้า
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setTimeOfDay("เย็น")}
+            style={[
+              styles.todBtn,
+              timeOfDay === "เย็น"
+                ? { backgroundColor: "#1889da" }
+                : { backgroundColor: "#b6b6b6" },
+            ]}
+          >
+            <Text style={{ fontFamily: "Kanit_400Regular", color: "white" }}>
+              เย็น
+            </Text>
+          </TouchableOpacity>
+        </View>
+        {/* ปุ่มถ่ายภาพ */}
+        <Text style={styles.titleShow}>รูปภาพสถานที่</Text>
+        <TouchableOpacity style={styles.takePhotoBtn} onPress={handleTakePhoto}>
+          {image ? (
+            <Image
+              source={{ uri: image }}
+              style={{ width: "100%", height: 200 }}
+            />
+          ) : (
+            <View style={{ alignItems: "center" }}>
+              <Ionicons name="camera" size={30} color="#b6b6b6" />
+              <Text
+                style={{ fontFamily: "Kanit_400Regular", color: "#b6b6b6" }}
+              >
+                กดเพื่อถ่ายภาพ
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
 
-
-
-                    </TouchableOpacity>
-
-                    <TouchableOpacity style={styles.saveButton} activeOpacity={0.8}>
-                        <Text style={styles.saveText}>บันทึกข้อมูล</Text>
-                    </TouchableOpacity>
-                </View>
-            </ScrollView>
-        </KeyboardAvoidingView>
-    )
+        {/* ปุ่มบันทึก */}
+        <TouchableOpacity style={styles.saveBtn} onPress={handleSaveToSupabase}>
+          <Text style={{ fontFamily: "Kanit_700Bold", color: "white" }}>
+            บันทึกข้อมูล
+          </Text>
+        </TouchableOpacity>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#f4f6fb',
-    },
-    scrollContainer: {
-        padding: 20,
-    },
-
-
-    label: {
-        fontFamily: 'kanit_700bold',
-        marginBottom: 8,
-        marginTop: 10,
-        color: '#333'
-    },
-    input: {
-        backgroundColor: '#f1f3f6',
-        borderRadius: 12,
-        padding: 14,
-        marginBottom: 10,
-        fontFamily: 'kanit_400regular',
-    },
-    timeContainer: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginBottom: 15
-    },
-    timeButton: {
-        flex: 1,
-        padding: 12,
-        borderRadius: 12,
-        backgroundColor: '#e0e7ff',
-        alignItems: 'center',
-        marginHorizontal: 5
-    },
-    timeButtonActive: {
-        backgroundColor: '#063197',
-    },
-    timeText: {
-        color: '#063197',
-        fontFamily: 'kanit_700bold'
-    },
-    timeTextActive: {
-        color: '#fff'
-    },
-    takePhotoBtn: {
-        height: 250,
-        backgroundColor: '#eef1f7',
-        borderRadius: 16,
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginVertical: 15,
-        borderWidth: 2,
-        borderColor: '#d6dbe6',
-        borderStyle: 'dashed'
-    },
-    saveButton: {
-        backgroundColor: '#063197',
-        paddingVertical: 15,
-        borderRadius: 14,
-        alignItems: 'center',
-        marginTop: 10,
-        shadowColor: '#063197',
-        shadowOpacity: 0.4,
-        shadowRadius: 8,
-        elevation: 6
-    },
-    saveText: {
-        color: '#fff',
-        fontFamily: 'kanit_700bold',
-        fontSize: 16
-    }
-})
+  todBtn: {
+    paddingVertical: 10,
+    borderRadius: 25,
+    marginRight: 10,
+    paddingHorizontal: 20,
+  },
+  saveBtn: {
+    backgroundColor: "#1889da",
+    marginTop: 20,
+    borderRadius: 8,
+    alignItems: "center",
+    padding: 15,
+  },
+  takePhotoBtn: {
+    width: "100%",
+    height: 200,
+    backgroundColor: "#e6e6e6",
+    borderRadius: 25,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  titleShow: {
+    fontFamily: "Kanit_700Bold",
+    marginBottom: 10,
+  },
+  inputValue: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 8,
+    padding: 15,
+    marginBottom: 20,
+    fontFamily: "Kanit_400Regular",
+    backgroundColor: "#EFEFEF",
+  },
+});
